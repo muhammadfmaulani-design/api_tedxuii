@@ -10,3 +10,4 @@ python-barcode
 pydantic-settings
 midtransclient
 pillow
+email-validator
