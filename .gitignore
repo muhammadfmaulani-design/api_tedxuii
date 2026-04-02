@@ -1,0 +1,42 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.python-version
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.env/
+node_modules/
+
+# Environment Variables (SANGAT PENTING)
+.env
+.env.local
+.env.*
+!.env.example
+
+# IDE - VS Code
+.vscode/
+*.code-workspace
+.history/
+
+# IDE - PyCharm
+.idea/
+
+# OS - System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project Specific - Temporary Files
+# Menghindari file tiket sementara ter-upload ke git
+app/static/templates/temp_*
+temp_*.jpg
+temp_*.pdf
+*.log
+
+# Vercel
+.vercel
