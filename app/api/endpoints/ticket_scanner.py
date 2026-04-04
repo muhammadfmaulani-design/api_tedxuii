@@ -51,11 +51,25 @@ async def scan_ticket(request: ScanRequest):
         
         # MODE 1: Pintu Masuk Pagi (Semua boleh masuk)
         if request.scan_mode == 1:
+            # A. CEK DULU: Apakah tiket sudah pernah di-checkin?
+            if ticket_data.get("is_used") == True:
+                return {
+                    "status": "warning",
+                    "ui_color": "yellow",
+                    "message": f"DITOLAK!\nTiket {peserta_name} sudah digunakan pada {ticket_data.get('checkin_at')}"
+                }
+
+            # B. UPDATE TABEL TICKETS: Tandai sebagai sudah masuk
+            supabase.table("tickets").update({
+                "is_used": True,
+                "checkin_at": "now()" # Menggunakan fungsi waktu database
+            }).eq("ticket_code", request.ticket_code).execute()
+
             tipe = "Full Session (VIP)" if is_vip else "Sesi 1 Saja (Reguler)"
             return {
                 "status": "success",
                 "ui_color": "green",
-                "message": f"Tiket Valid!\nNama: {peserta_name}\nTipe: {tipe}",
+                "message": f"Tiket Valid!\nNama: {peserta_name}\nSelamat Datang!",
                 "peserta": peserta_name
             }
 
