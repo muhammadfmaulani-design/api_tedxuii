@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.endpoints import order # Pastikan file di endpoints namanya order.py
+from app.api.endpoints import order 
+from app.api.endpoints import ticket_scanner
 from app.core.config import settings
 
 app = FastAPI(title=settings.PROJECT_NAME)
@@ -16,6 +17,7 @@ app.add_middleware(
 
 # Include Routers
 app.include_router(order.router, prefix="/api/v1/orders", tags=["Orders"])
+app.include_router(ticket_scanner.router, prefix="/api/v1/ticket-scanner", tags=["Ticket Scanner"]) # 2. TAMBAHKAN ROUTER INI
 
 @app.get("/")
 def read_root():
