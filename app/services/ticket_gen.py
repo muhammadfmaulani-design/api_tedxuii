@@ -6,7 +6,7 @@ from app.core.supabase import supabase
 
 def generate_qr_ticket(ticket_code: str, buyer_name: str):
     # 1. Tentukan path template desain kamu
-    template_path = "app/static/templates/desain_tiket.jpg" 
+    template_path = "app/static/templates/desain_tiket.png" 
     output_path = f"temp_{ticket_code}.jpg"
     
     if not os.path.exists(template_path):
