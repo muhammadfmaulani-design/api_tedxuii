@@ -61,14 +61,26 @@ async def midtrans_webhook(request: Request):
     transaction_status = data.get('transaction_status')
     fraud_status = data.get('fraud_status')
 
-    if transaction_status == 'capture' or transaction_status == 'settlement':
+    # --- REVISI 1: PENYARING TESTING MIDTRANS ---
+    # Jika Midtrans cuma ngetes URL, jangan lanjut ke database agar tidak crash UUID
+    if not order_id or order_id.startswith("payment_notif_test"):
+        return {"status": "success", "message": "Test notification received"}
+
+    if transaction_status in ['capture', 'settlement']:
         if fraud_status == 'challenge':
             return {"status": "challenged"}
         
+        # --- REVISI 2: CEK APAKAH SUDAH SUCCESS SEBELUMNYA ---
+        # Ini penting agar jika Midtrans kirim notif 2x, tiket tidak ter-generate double
+        check_order = supabase.table("orders").select("status").eq("id", order_id).execute()
+        if check_order.data and check_order.data[0]['status'] == 'success':
+            return {"status": "already_processed"}
+
         # 1. Update status orders
         supabase.table("orders").update({"status": "success"}).eq("id", order_id).execute()
         
         # 2. Ambil data orders (termasuk quantity)
+        # Gunakan select("*, ticket_categories(id, name)") untuk ambil data relasi
         order_res = supabase.table("orders").select("*, ticket_categories(name)").eq("id", order_id).execute()
         if not order_res.data:
             return {"status": "error", "message": "Order not found"}
@@ -78,14 +90,20 @@ async def midtrans_webhook(request: Request):
         cat_id = order_info['category_id']
         
         # 3. Update Jumlah Terjual di Kategori
-        # CATATAN: Pastikan function 'increment_sold' di Supabase menerima parameter tambahan 'amount'
-        supabase.rpc('increment_sold', {'row_id': cat_id, 'amount': qty}).execute() 
+        # Pastikan RPC 'increment_sold' di Supabase sudah menerima parameter 'amount'
+        try:
+            supabase.rpc('increment_sold', {'row_id': cat_id, 'amount': qty}).execute()
+        except Exception as e:
+            print(f"Error incrementing sold: {e}")
 
         # 4 & 5. Loop untuk membuat tiket sebanyak Quantity
         generated_ticket_urls = []
         for i in range(qty):
-            # Bikin kode tiket unik per lembar (Misal: TEDX-ABCDE-1, TEDX-ABCDE-2)
-            ticket_code = f"TEDX-{order_id[:6].upper()}-{i+1}"
+            # Bikin kode tiket unik: TEDX-OrderAwal-NomorUrut
+            short_id = str(order_id).split("-")[0].upper() # Ambil bagian depan UUID
+            ticket_code = f"TEDX-{short_id}-{i+1}"
+            
+            # Generate QR/PDF
             public_pdf_url = generate_qr_ticket(ticket_code, order_info['full_name'])
             
             if public_pdf_url:
@@ -97,8 +115,9 @@ async def midtrans_webhook(request: Request):
                 generated_ticket_urls.append(public_pdf_url)
         
         # 6. Kirim semua link tiket via email
-        send_ticket_email(order_info['email'], order_info['full_name'], generated_ticket_urls)
+        if generated_ticket_urls:
+            send_ticket_email(order_info['email'], order_info['full_name'], generated_ticket_urls)
         
-        return {"status": "success", "message": f"{qty} Ticket(s) generated and sent"}
+        return {"status": "success", "message": f"{len(generated_ticket_urls)} Ticket(s) generated and sent"}
 
     return {"status": "pending/other"}
