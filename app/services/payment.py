@@ -1,24 +1,26 @@
 import midtransclient
 from app.core.config import settings
 
-# Initialize Midtrans Client
 snap = midtransclient.Snap(
     is_production=settings.MIDTRANS_IS_PRODUCTION,
     server_key=settings.MIDTRANS_SERVER_KEY,
     client_key=settings.MIDTRANS_CLIENT_KEY
 )
 
-def create_midtrans_transaction(order_id: str, amount: int, user_data):
+def create_midtrans_transaction(order_id: str, price_per_ticket: int, quantity: int, user_data):
+    # Hitung total harga
+    gross_amount = price_per_ticket * quantity
+
     param = {
         "transaction_details": {
             "order_id": order_id,
-            "gross_amount": amount
+            "gross_amount": gross_amount
         },
         "item_details": [{
-            "id": "TICKET-001",
-            "price": amount,
-            "quantity": 1,
-            "name": "TEDxUII Event Ticket"
+            "id": str(user_data.category_id)[:10], # ID barang (opsional)
+            "price": price_per_ticket,
+            "quantity": quantity,
+            "name": "TEDxUII 2026 Ticket"
         }],
         "customer_details": {
             "first_name": user_data.full_name,
