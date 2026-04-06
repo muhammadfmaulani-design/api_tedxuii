@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, status
+from fastapi import APIRouter, HTTPException, Request, status
 from app.models.order import OrderCreate, OrderResponse
 from app.core.supabase import supabase
 from app.services.payment import create_midtrans_transaction
@@ -9,43 +9,49 @@ import uuid
 router = APIRouter()
 
 # ==========================================
-# FUNGSI PEKERJA LATAR BELAKANG (BACKGROUND TASK)
+# FUNGSI PROSES TIKET & EMAIL (Dibuat Async)
 # ==========================================
-def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: str, full_name: str, email: str):
+async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: str, full_name: str, email: str, ticket_type: str):
     """
-    Fungsi ini dieksekusi di belakang layar setelah API membalas Midtrans dengan 200 OK.
+    Fungsi ini ditunggu (await) agar Vercel tidak membunuh proses di tengah jalan.
     """
     try:
-        # 3. Update Jumlah Terjual di Tabel Kategori menggunakan RPC
+        # 1. Update Jumlah Terjual di Tabel Kategori
         try:
             supabase.rpc('increment_sold', {'row_id': cat_id, 'amount': qty}).execute()
         except Exception as e:
             print(f"Log: Gagal update kuota terjual: {e}")
 
-        # 4 & 5. Looping untuk membuat tiket
-        generated_ticket_urls = []
+        # 2. Looping untuk membuat tiket
+        generated_tickets = []
         for i in range(qty):
             short_id = str(order_id).split("-")[0].upper() 
             ticket_code = f"TEDX-{short_id}-{i+1}"
             
-            public_pdf_url = generate_qr_ticket(ticket_code, full_name)
+            # PERBAIKAN: Kirim ticket_type agar template tidak tertukar!
+            ticket_data = generate_qr_ticket(
+                ticket_code=ticket_code, 
+                buyer_name=full_name, 
+                ticket_type=ticket_type # <--- Ini kuncinya!
+            )
             
-            if public_pdf_url:
+            if ticket_data:
                 supabase.table("tickets").insert({
                     "order_id": order_id,
                     "ticket_code": ticket_code,
-                    "ticket_pdf_url": public_pdf_url
+                    "ticket_pdf_url": ticket_data["public_url"] # Simpan URL di DB
                 }).execute()
                 
-                generated_ticket_urls.append(public_pdf_url)
+                # Simpan seluruh dict (url & local_path) untuk dilampirkan ke email
+                generated_tickets.append(ticket_data)
         
-        # 6. Kirim email
-        if generated_ticket_urls:
-            send_ticket_email(email, full_name, generated_ticket_urls)
-            print(f"Log: Sukses mengirim {len(generated_ticket_urls)} tiket ke {email}")
+        # 3. Kirim email beserta GAMBARNYA
+        if generated_tickets:
+            send_ticket_email(email, full_name, generated_tickets)
+            print(f"Log: Sukses mengirim {len(generated_tickets)} tiket ke {email}")
             
     except Exception as e:
-        print(f"Critical Error on Background Task: {str(e)}")
+        print(f"Critical Error on Process Task: {str(e)}")
 
 
 # ==========================================
@@ -53,20 +59,19 @@ def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: str, fu
 # ==========================================
 @router.post("/", response_model=OrderResponse)
 async def create_new_order(order_data: OrderCreate):
-    # 1. Cek Kategori & Kuota
+    # Cek Kategori & Kuota
     res = supabase.table("ticket_categories").select("*").eq("id", str(order_data.category_id)).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Kategori tiket tidak ditemukan")
     
     category = res.data[0]
     
-    # PERBAIKAN: Pastikan kuota cukup untuk jumlah yang dibeli
     if category['sold'] + order_data.quantity > category['quota']:
         raise HTTPException(status_code=400, detail="Maaf, sisa kuota tiket tidak mencukupi untuk pesanan Anda!")
 
     total_price = category['price'] * order_data.quantity
 
-    # 2. Buat ID Pesanan & Simpan ke DB
+    # Buat ID Pesanan & Simpan ke DB
     order_id = str(uuid.uuid4())
     order_payload = {
         "id": order_id,
@@ -83,24 +88,18 @@ async def create_new_order(order_data: OrderCreate):
     if not insert_res.data:
         raise HTTPException(status_code=500, detail="Gagal menyimpan data pesanan")
 
-    # 3. Request Token Midtrans
     snap_token = create_midtrans_transaction(order_id, category['price'], order_data.quantity, order_data)
-    
     if not snap_token:
         raise HTTPException(status_code=500, detail="Gagal terhubung ke layanan pembayaran")
 
-    return OrderResponse(
-        id=order_id,
-        status="pending",
-        total_price=total_price,
-        message=snap_token
-    )
+    return OrderResponse(id=order_id, status="pending", total_price=total_price, message=snap_token)
 
 # ==========================================
 # ENDPOINT WEBHOOK MIDTRANS
 # ==========================================
+# HAPUS parameter background_tasks, Vercel benci background tasks!
 @router.post("/webhook")
-async def midtrans_webhook(request: Request, background_tasks: BackgroundTasks):
+async def midtrans_webhook(request: Request):
     data = await request.json()
     
     order_id = data.get('order_id')
@@ -118,10 +117,9 @@ async def midtrans_webhook(request: Request, background_tasks: BackgroundTasks):
         if check_order.data and check_order.data[0]['status'] == 'success':
             return {"status": "already_processed", "message": "Order already marked as success"}
 
-        # 1. Update status orders di Supabase menjadi success (Cepat)
         supabase.table("orders").update({"status": "success"}).eq("id", order_id).execute()
         
-        # 2. Ambil data order lengkap (Cepat)
+        # PERBAIKAN: Ambil NAMA kategori tiket untuk mencegah tertukar
         order_res = supabase.table("orders").select("*, ticket_categories(name)").eq("id", order_id).execute()
         if not order_res.data:
             return {"status": "error", "message": "Order not found in database"}
@@ -129,21 +127,21 @@ async def midtrans_webhook(request: Request, background_tasks: BackgroundTasks):
         order_info = order_res.data[0]
         qty = order_info.get('quantity', 1) 
         cat_id = order_info['category_id']
+        ticket_type_name = order_info['ticket_categories']['name'] # Hasil: "Full Session" atau "One Session"
         
-        # 3. Lempar tugas berat ke background task
-        background_tasks.add_task(
-            process_ticket_generation_and_email,
+        # LANGSUNG DI-AWAIT (Dituggu sampai selesai)
+        await process_ticket_generation_and_email(
             order_id=order_id,
             qty=qty,
             cat_id=cat_id,
             full_name=order_info['full_name'],
-            email=order_info['email']
+            email=order_info['email'],
+            ticket_type=ticket_type_name # Mengirim nama tipe tiket aslinya
         )
         
-        # 4. Langsung balas Midtrans
         return {
             "status": "success", 
-            "message": "Payment verified. Ticket generation running in background."
+            "message": "Payment verified. Ticket generated and email sent."
         }
 
     return {"status": "info", "message": f"Transaction status is {transaction_status}"}
