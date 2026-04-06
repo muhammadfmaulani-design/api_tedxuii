@@ -4,14 +4,22 @@ from PIL import Image, ImageDraw, ImageFont
 import os
 from app.core.supabase import supabase
 
-# FUNGSI CUSTOM: Menggambar teks dengan letter spacing karena PIL tidak memiliki fitur bawaan ini
-def draw_text_with_spacing(draw, text, position, font, fill, spacing_px):
-    x, y = position
-    for char in text:
-        draw.text((x, y), char, font=font, fill=fill)
-        # Dapatkan lebar karakter saat ini, lalu tambahkan nilai spacing (yang bernilai minus)
-        char_width = font.getlength(char)
-        x += char_width + spacing_px
+def get_scalable_font(size):
+    # Fungsi ini akan mencari font bawaan sistem agar ukurannya BISA dibesarkan
+    # Tanpa perlu mengandalkan file font eksternal.
+    system_fonts = [
+        "arial.ttf", "DejaVuSans-Bold.ttf", "FreeSansBold.ttf", 
+        "LiberationSans-Bold.ttf", "tahoma.ttf", "Helvetica"
+    ]
+    for font in system_fonts:
+        try:
+            return ImageFont.truetype(font, size)
+        except IOError:
+            continue
+            
+    # Jika sistem Vercel benar-benar kosong (sangat jarang terjadi), 
+    # ini adalah fallback terakhir.
+    return ImageFont.load_default()
 
 def generate_qr_ticket(ticket_code: str, buyer_name: str, seat: str = "TBA", ticket_type: str = "FULL"):
     # 1. Tentukan Template
@@ -20,7 +28,7 @@ def generate_qr_ticket(ticket_code: str, buyer_name: str, seat: str = "TBA", tic
     else:
         template_path = "app/static/templates/template_one.png"
         
-    output_path = f"/tmp/temp_{ticket_code}.png"
+    output_path = f"/tmp/temp_{ticket_code}.jpg"
     
     if not os.path.exists(template_path):
         print(f"Error: Template tidak ditemukan di {template_path}")
@@ -41,29 +49,20 @@ def generate_qr_ticket(ticket_code: str, buyer_name: str, seat: str = "TBA", tic
     qr_y = int(height * 0.33) 
     img.paste(qr_img, (qr_x, qr_y)) 
 
-    # 3. CETAK TEKS SESUAI SPESIFIKASI FIGMA
+    # 3. SETUP FONT (Dinamis berdasarkan resolusi gambar)
     draw = ImageDraw.Draw(img)
     
-    try:
-        # PASTIKAN: Kamu harus mendownload font Satoshi-Bold.ttf dan menaruhnya di folder ini
-        font_path = "app/static/fonts/Satoshi-Bold.ttf"
-        
-        # Terapkan ukuran absolut dari Figma (Size: 96)
-        font_name = ImageFont.truetype(font_path, 96) 
-        
-        # Asumsi untuk Seat dan Order Number. Sesuaikan lagi dengan inspektor Figma kamu jika berbeda
-        font_seat = ImageFont.truetype(font_path, 72) 
-        font_order = ImageFont.truetype(font_path, 54) 
-    except IOError:
-        print("Peringatan: Font Satoshi tidak ditemukan, pastikan path benar!")
-        font_name = ImageFont.load_default()
-        font_seat = ImageFont.load_default()
-        font_order = ImageFont.load_default()
+    # Kita tidak pakai angka pasti seperti 96, tapi pakai PERSENTASE dari tinggi gambar.
+    # Dijamin pasti besar berapapun resolusi gambarnya.
+    size_name = int(height * 0.12)  # Font Nama: 12% dari tinggi tiket
+    size_seat = int(height * 0.10)  # Font Seat: 10% dari tinggi tiket
+    size_order = int(height * 0.08) # Font Order: 8% dari tinggi tiket
 
-    # Hitung Letter Spacing: -6% dari font size 96 = -5.76 pixel
-    spacing_name_px = 96 * (-0.06)
+    font_name = get_scalable_font(size_name)
+    font_seat = get_scalable_font(size_seat)
+    font_order = get_scalable_font(size_order)
 
-    # KOORDINAT (Gunakan koordinat X dan Y persis dari menu Inspect/Code di Figma jika mau akurasi 100%)
+    # 4. KOORDINAT TEKS
     name_x = int(width * 0.09)
     name_y = int(height * 0.48)
     
@@ -73,21 +72,12 @@ def generate_qr_ticket(ticket_code: str, buyer_name: str, seat: str = "TBA", tic
     order_x = int(width * 0.755)
     order_y = int(height * 0.54)
 
-    # 4. CETAK NAMA DENGAN FUNGSI SPACING KHUSUS
-    draw_text_with_spacing(
-        draw=draw, 
-        text=buyer_name.upper()[:15], 
-        position=(name_x, name_y), 
-        font=font_name, 
-        fill="#FFFFFF", 
-        spacing_px=spacing_name_px
-    )
-    
-    # Cetak teks lainnya (Seat & Order)
+    # 5. CETAK TEKS KE TIKET
+    draw.text((name_x, name_y), buyer_name.upper()[:15], fill="#FFFFFF", font=font_name)
     draw.text((seat_x, seat_y), seat.upper(), fill="#FFFFFF", font=font_seat)
     draw.text((order_x, order_y), ticket_code, fill="#000000", font=font_order)
     
-    # 5. Simpan & Upload
+    # 6. Simpan & Upload
     img.save(output_path, "JPEG", quality=100) 
     
     file_name = f"public/{ticket_code}.jpg"
