@@ -4,67 +4,78 @@ from PIL import Image, ImageDraw, ImageFont
 import os
 from app.core.supabase import supabase
 
-def generate_qr_ticket(ticket_code: str, buyer_name: str):
-    # 1. Tentukan path template desain kamu
-    template_path = "app/static/templates/desain_tiket.png" 
-    output_path = f"/tmp/temp_{ticket_code}.jpg" # Sudah benar pakai /tmp/ untuk Vercel
+def generate_qr_ticket(ticket_code: str, buyer_name: str, seat: str = "TBA", ticket_type: str = "FULL"):
+    # 1. Tentukan path template berdasarkan tipe tiket
+    if ticket_type.upper() == "FULL":
+        template_path = "app/static/templates/TICKET_FULL.png"
+    else:
+        template_path = "app/static/templates/TICKET_ONE.png"
+        
+    output_path = f"/tmp/temp_{ticket_code}.jpg"
     
     if not os.path.exists(template_path):
         print(f"Error: Template tidak ditemukan di {template_path}")
         return None
 
-    # 2. Buka Desain Tiket & Konversi ke RGB (Syarat wajib sebelum save ke JPG)
+    # 2. Buka Desain Tiket & Konversi ke RGB
     img = Image.open(template_path).convert('RGB')
     width, height = img.size
 
     # 3. Generate QR Code
-    qr = qrcode.QRCode(version=1, box_size=10, border=2) # Border dikecilkan agar lebih elegan
+    qr = qrcode.QRCode(version=1, box_size=10, border=1) # Border ditipiskan agar pas di dalam garis putus-putus
     qr.add_data(ticket_code)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
     
-    # 4. MATEMATIKA POSISI: Hitung Ukuran & Titik Koordinat Dinamis
-    # Kita asumsikan kotak krem di kiri lebarnya sama dengan tinggi tiket (persegi)
-    qr_size = int(height * 0.55) # Ukuran QR adalah 55% dari tinggi tiket
+    # 4. MATEMATIKA POSISI: Berdasarkan Persentase Desain Baru
+    # Mengambil ~42% dari tinggi tiket agar pas masuk ke dalam kotak putus-putus
+    qr_size = int(height * 0.42)
     qr_img = qr_img.resize((qr_size, qr_size), Image.Resampling.LANCZOS)
 
-    # Pusatkan posisi X dan Y di area kotak sebelah kiri
-    pos_x = int((height - qr_size) / 2)
-    pos_y = int((height - qr_size) / 2) - int(height * 0.05) # Naikkan sedikit untuk ruang teks di bawahnya
+    # Koordinat QR Code (Di area tengah-kanan)
+    qr_x = int(width * 0.505) # Berada di sekitar 50.5% dari kiri
+    qr_y = int(height * 0.38) # Berada di sekitar 38% dari atas
 
     # Tempel QR Code ke kanvas tiket
-    img.paste(qr_img, (pos_x, pos_y)) 
+    img.paste(qr_img, (qr_x, qr_y)) 
 
-    # 5. CETAK NAMA PEMBELI & KODE TIKET
+    # 5. CETAK TEKS (NAMA, SEAT, ORDER NUMBER)
     draw = ImageDraw.Draw(img)
     
-    # Setup Font (Gunakan try-except agar Vercel tidak crash jika font lupa diupload)
+    # Setup Font Dinamis
     try:
-        # Pastikan Anda punya file font ini di folder static
         font_path = "app/static/fonts/Roboto-Bold.ttf"
-        font_name = ImageFont.truetype(font_path, int(height * 0.035))
-        font_code = ImageFont.truetype(font_path, int(height * 0.025))
+        font_name = ImageFont.truetype(font_path, int(height * 0.08)) # Font besar untuk Nama/Order
+        font_seat = ImageFont.truetype(font_path, int(height * 0.08)) # Font untuk Seat
     except IOError:
-        # Jika font tidak ditemukan, pakai font default bawaan sistem
         font_name = ImageFont.load_default()
-        font_code = ImageFont.load_default()
+        font_seat = ImageFont.load_default()
 
-    # Tentukan posisi teks (sejajar dengan sisi kiri QR code, letaknya di bawah QR)
-    text_y_start = pos_y + qr_size + int(height * 0.03) # Jarak antara QR dan teks
+    # Koordinat X dan Y Teks (Berdasarkan estimasi visual dari desain baru)
+    name_x = int(width * 0.09)
+    name_y = int(height * 0.46)
     
-    # Tulis Nama dan Kode dengan warna gelap (karena backgroundnya krem)
-    draw.text((pos_x, text_y_start), f"NAMA : {buyer_name.upper()[:20]}", fill="#1f2937", font=font_name)
-    draw.text((pos_x, text_y_start + int(height * 0.04)), f"KODE : {ticket_code}", fill="#4b5563", font=font_code)
+    seat_x = int(width * 0.31)
+    seat_y = int(height * 0.46)
+    
+    order_x = int(width * 0.755)
+    order_y = int(height * 0.54)
+
+    # Tulis Teks ke Gambar
+    # Nama dan Seat di area hitam (Gunakan teks Putih)
+    draw.text((name_x, name_y), buyer_name.upper()[:15], fill="#ffffff", font=font_name)
+    draw.text((seat_x, seat_y), seat.upper(), fill="#ffffff", font=font_seat)
+    
+    # Order Number di area sobekan putih (Gunakan teks Hitam)
+    draw.text((order_x, order_y), ticket_code, fill="#000000", font=font_name)
     
     # 6. Simpan gambar sementara di Vercel
-    # Gunakan quality=95 agar gambar tajam dan teks tidak buram
     img.save(output_path, "JPEG", quality=95)
     
     # 7. Upload ke Supabase Storage
     file_name = f"public/{ticket_code}.jpg"
     try:
         with open(output_path, "rb") as f:
-            # Tambahkan upsert=true agar tidak error jika nama file sudah ada
             supabase.storage.from_("tickets").upload(
                 file_name, 
                 f, 
