@@ -16,11 +16,11 @@ def draw_text_with_spacing(draw, text, position, font, fill, spacing_px):
 def generate_qr_ticket(ticket_code: str, buyer_name: str, seat: str = "TBA", ticket_type: str = "FULL"):
     # 1. Tentukan Template
     if "FULL" in ticket_type.upper():
-        template_path = "app/static/templates/template_full.jpg"
+        template_path = "app/static/templates/template_full.png"
     else:
-        template_path = "app/static/templates/template_one.jpg"
+        template_path = "app/static/templates/template_one.png"
         
-    output_path = f"/tmp/temp_{ticket_code}.jpg"
+    output_path = f"/tmp/temp_{ticket_code}.png"
     
     if not os.path.exists(template_path):
         print(f"Error: Template tidak ditemukan di {template_path}")
