@@ -32,17 +32,21 @@ async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: s
             ticket_data = generate_ticket(
                 ticket_code=ticket_code, 
                 buyer_name=full_name, 
-                ticket_type=ticket_type # <--- Ini kuncinya!
+                ticket_type=ticket_type 
             )
             
             if ticket_data:
+                # PERBAIKAN: Gunakan .get() agar tidak crash jika public_url tidak ada
+                # Sementara kita isi dengan string kosong atau tanda strip
+                db_url = ticket_data.get("public_url", "") 
+                
                 supabase.table("tickets").insert({
                     "order_id": order_id,
                     "ticket_code": ticket_code,
-                    "ticket_pdf_url": ticket_data["public_url"] # Simpan URL di DB
+                    "ticket_pdf_url": db_url # <--- Sudah aman dari KeyError!
                 }).execute()
                 
-                # Simpan seluruh dict (url & local_path) untuk dilampirkan ke email
+                # Simpan seluruh dict (local_path & seat) untuk dilampirkan ke email
                 generated_tickets.append(ticket_data)
         
         # 3. Kirim email beserta GAMBARNYA
