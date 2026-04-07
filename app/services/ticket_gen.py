@@ -8,14 +8,18 @@ def generate_qr_ticket(ticket_code: str, buyer_name: str = "", seat: str = "", t
     """
     Generator Tiket TEDxUII 3.0 (Versi Minimalis).
     Hanya men-generate QR Code dan menempelkannya ke template.
-    Bebas dari masalah font dan koordinat teks.
     """
     
-    # 1. Tentukan Template berdasarkan Tipe Tiket
-    if "FULL" in ticket_type.upper():
-        template_path = "app/static/templates/template_full.png"
+    # 1. Tentukan Template berdasarkan Tipe Tiket (Sekarang ada 3)
+    ticket_type_upper = ticket_type.upper()
+    
+    if "MORNING" in ticket_type_upper:
+        template_path = "app/static/templates/template_morning.png"
+    elif "AFTERNOON" in ticket_type_upper:
+        template_path = "app/static/templates/template_afternoon.png"
     else:
-        template_path = "app/static/templates/template_one.png"
+        # Default fallback ke Full Session (jika tidak ada kata morning/afternoon)
+        template_path = "app/static/templates/template_full.png"
         
     output_path = f"/tmp/out_{ticket_code}.jpg"
     
