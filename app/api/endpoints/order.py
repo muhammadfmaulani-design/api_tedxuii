@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.models.order import OrderCreate, OrderResponse
 from app.core.supabase import supabase
 from app.services.payment import create_midtrans_transaction
-from app.services.ticket_gen import generate_qr_ticket
+from app.services.ticket_gen import generate_ticket
 from app.services.mailer import send_ticket_email
 import uuid
 
@@ -29,7 +29,7 @@ async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: s
             ticket_code = f"TEDX-{short_id}-{i+1}"
             
             # PERBAIKAN: Kirim ticket_type agar template tidak tertukar!
-            ticket_data = generate_qr_ticket(
+            ticket_data = generate_ticket(
                 ticket_code=ticket_code, 
                 buyer_name=full_name, 
                 ticket_type=ticket_type # <--- Ini kuncinya!
