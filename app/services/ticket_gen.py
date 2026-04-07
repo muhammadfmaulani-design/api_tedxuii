@@ -1,73 +1,155 @@
-# app/services/ticket_gen.py
 import qrcode
-from PIL import Image
 import os
+import tempfile
+from PIL import Image, ImageDraw, ImageFont
 from app.core.supabase import supabase
 
-def generate_qr_ticket(ticket_code: str, buyer_name: str = "", seat: str = "", ticket_type: str = "FULL"):
+def wrap_and_truncate_text(text: str, font, max_width: int, max_lines: int = 2) -> str:
     """
-    Generator Tiket TEDxUII 3.0 (Versi Minimalis).
-    Hanya men-generate QR Code dan menempelkannya ke template.
+    Memecah teks menjadi beberapa baris. 
+    Jika jumlah baris melebihi max_lines, teks akan dipotong dan ditambahkan '...' di akhirnya.
     """
+    words = text.split()
+    lines = []
+    current_line = []
     
-    # 1. Tentukan Template berdasarkan Tipe Tiket (Sekarang ada 3)
-    ticket_type_upper = ticket_type.upper()
-    
-    if "MORNING" in ticket_type_upper:
-        template_path = "app/static/templates/template_morning.png"
-    elif "AFTERNOON" in ticket_type_upper:
-        template_path = "app/static/templates/template_afternoon.png"
-    else:
-        # Default fallback ke Full Session (jika tidak ada kata morning/afternoon)
-        template_path = "app/static/templates/template_full.png"
+    for word in words:
+        test_line = " ".join(current_line + [word])
+        # Cek apakah kata tambahan ini masih muat di baris sekarang
+        if font.getlength(test_line) <= max_width:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+                current_line = [word]
+            else:
+                # Jika 1 kata saja sudah melebihi batas (kata super panjang)
+                lines.append(word)
+                current_line = []
+                
+    if current_line:
+        lines.append(" ".join(current_line))
         
-    output_path = f"/tmp/out_{ticket_code}.jpg"
+    # --- LOGIKA PEMOTONGAN (TRUNCATE) ---
+    if len(lines) > max_lines:
+        # Ambil baris sesuai batas maksimal saja
+        lines = lines[:max_lines]
+        
+        # Ambil baris paling terakhir untuk dipotong
+        last_line = lines[-1]
+        
+        # Hapus kata dari belakang satu per satu sampai muat ditambah "..."
+        while True:
+            test_last_line = last_line + "_"
+            if font.getlength(test_last_line) <= max_width or len(last_line.split()) <= 1:
+                lines[-1] = test_last_line
+                break
+            else:
+                # Hapus 1 kata terakhir dari kalimat
+                last_words = last_line.split()
+                last_line = " ".join(last_words[:-1])
+                
+    return "\n".join(lines)
+
+
+def generate_ticket(ticket_code: str, buyer_name: str, ticket_type: str = "FULL") -> dict:
+    """
+    Menghasilkan tiket fisik (JPG) TEDxUII dengan resolusi tinggi.
+    File disimpan secara aman di temporary directory agar kompatibel dengan Vercel Serverless.
+    """
     
+    # ==========================================
+    # 1. ALOKASI KURSI (SUPABASE)
+    # ==========================================
+    try:
+        seat_res = supabase.table("seats")\
+            .select("seat_number")\
+            .eq("is_available", True)\
+            .order("id", desc=False)\
+            .limit(1).execute()
+        
+        seat_number = seat_res.data[0]['seat_number'] if seat_res.data else "N/A"
+        
+        if seat_number != "N/A":
+            supabase.table("seats").update({
+                "is_available": False, 
+                "assigned_to": ticket_code
+            }).eq("seat_number", seat_number).execute()
+            
+    except Exception as e:
+        print(f"⚠️ [TicketGen] Database Error: {e}")
+        seat_number = "TBD"
+
+    # ==========================================
+    # 2. RESOLVE PATH TEMPLATE & FONT
+    # ==========================================
+    t_type = ticket_type.upper()
+    if "MORNING" in t_type:
+        file_name = "template_morning.png"
+    elif "AFTERNOON" in t_type:
+        file_name = "template_afternoon.png"
+    else:
+        file_name = "template_full.png"
+
+    current_file_path = os.path.dirname(os.path.abspath(__file__)) 
+    app_dir = os.path.dirname(current_file_path) 
+    
+    template_path = os.path.join(app_dir, "static", "templates", file_name)
+    font_path = os.path.join(app_dir, "static", "fonts", "Satoshi-Variable.ttf")
+
     if not os.path.exists(template_path):
-        print(f"ERROR CRITICAL: Template tidak ditemukan di {template_path}")
-        return None
+        raise FileNotFoundError(f"[TicketGen] Template hilang di: {template_path}")
 
-    # Buka Template dan Konversi ke RGB (wajib untuk save ke JPG)
+    # ==========================================
+    # 3. PROSES GAMBAR & RENDER TEKS
+    # ==========================================
     img = Image.open(template_path).convert('RGB')
-    width, height = img.size
+    draw = ImageDraw.Draw(img)
 
-    # 2. GENERATE & TEMPEL QR CODE
-    # Gunakan border=1 agar ukuran QR maksimal mengisi area
-    qr = qrcode.QRCode(version=1, box_size=10, border=1) 
+    try:
+        font_obj = ImageFont.truetype(font_path, 72) 
+    except Exception as e:
+        print(f"⚠️ [TicketGen] Font gagal diload: {e}")
+        font_obj = ImageFont.load_default()
+
+    color_white = (255, 255, 255)
+    
+    # --- AUTO WRAP & TRUNCATE NAMA ---
+    MAX_NAME_WIDTH = 680
+    
+    # max_lines=2 artinya nama hanya boleh maksimal 2 baris. Sisanya jadi "..."
+    wrapped_name = wrap_and_truncate_text(buyer_name.upper(), font_obj, MAX_NAME_WIDTH, max_lines=2)
+    
+    draw.multiline_text((322, 562), wrapped_name, font=font_obj, fill=color_white, spacing=15)
+    draw.text((1066, 522), seat_number, font=font_obj, fill=color_white)
+
+    # ==========================================
+    # 4. GENERATE & RENDER QR CODE
+    # ==========================================
+    qr = qrcode.QRCode(
+        version=1, 
+        error_correction=qrcode.constants.ERROR_CORRECT_H, 
+        box_size=10, 
+        border=1 
+    )
     qr.add_data(ticket_code)
     qr.make(fit=True)
+    
     qr_img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
+    qr_img = qr_img.resize((558, 558), Image.Resampling.LANCZOS)
     
-    # Matematika Posisi QR (52% dari tinggi tiket)
-    qr_size = int(height * 0.52) 
-    qr_img = qr_img.resize((qr_size, qr_size), Image.Resampling.LANCZOS)
-    
-    # Koordinat X dan Y untuk QR Code (Pusat kotak putus-putus)
-    qr_x = int(width * 0.485) 
-    qr_y = int(height * 0.31) 
-    
-    # Tempel QR ke gambar template
-    img.paste(qr_img, (qr_x, qr_y)) 
+    img.paste(qr_img, (1738, 445)) 
 
-    # 3. SIMPAN & UPLOAD KE SUPABASE
-    # Gunakan quality=100 agar gambar QR tajam maksimal dan mudah di-scan
-    img.save(output_path, "JPEG", quality=100) 
+    # ==========================================
+    # 5. SIMPAN KE TEMPORARY DIRECTORY (VERCEL SAFE)
+    # ==========================================
+    temp_dir = tempfile.gettempdir()
+    output_name = f"ticket_{ticket_code}.jpg"
+    output_path = os.path.join(temp_dir, output_name)
     
-    file_name = f"public/{ticket_code}.jpg"
-    try:
-        with open(output_path, "rb") as f:
-            supabase.storage.from_("tickets").upload(
-                file_name, f, {"content-type": "image/jpeg", "upsert": "true"}
-            )
-        # Ambil Public URL
-        public_url = supabase.storage.from_("tickets").get_public_url(file_name)
-        
-        # Kembalikan dictionary data untuk attachment email
-        return {
-            "public_url": public_url,
-            "local_path": output_path
-        }
-        
-    except Exception as e:
-        print(f"Gagal upload tiket ke Supabase: {e}")
-        return None
+    img.save(output_path, "JPEG", quality=90, optimize=True)
+    
+    return {
+        "local_path": output_path, 
+        "seat": seat_number
+    }
