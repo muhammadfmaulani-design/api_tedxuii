@@ -9,7 +9,11 @@ app = FastAPI(title=settings.PROJECT_NAME)
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=[
+        "http://localhost:5173", 
+        "https://www.tedxuii.com",
+        "https://tedxuii.com"
+    ], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
