@@ -7,3 +7,4 @@ pydantic-settings==2.13.1
 qrcode==8.2
 pillow==12.2.0
 python-multipart==0.0.5
+websockets>=13,<16
