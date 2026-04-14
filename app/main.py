@@ -12,7 +12,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173", 
         "https://www.tedxuii.com",
-        "https://tedxuii.com"
+        "https://tedxuii.com",
+        "https://operasional-tedxuii.vercel.app"
     ], 
     allow_credentials=True,
     allow_methods=["*"],
