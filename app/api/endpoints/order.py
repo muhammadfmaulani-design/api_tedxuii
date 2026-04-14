@@ -8,6 +8,46 @@ import os
 router = APIRouter()
 
 # ==========================================
+# LOGIKA PEMILIHAN KURSI OTOMATIS (Prioritas & VIP)
+# ==========================================
+def get_auto_assigned_seats(supabase_client, quantity: int):
+    # 1. Ambil semua kursi yang masih tersedia
+    response = supabase_client.table("seats").select("id").eq("is_booked", False).execute()
+    free_seats = response.data
+    
+    if not free_seats or len(free_seats) < quantity:
+        return None
+
+    def seat_priority(seat_id):
+        section = seat_id[0] # A, B, atau C
+        num = int(seat_id[1:]) # Nomor kursi
+        
+        # --- LEVEL 1: PRIORITAS UTAMA (Putaran Pertama) ---
+        if section == 'A' and 1 <= num <= 16: return 1
+        if section == 'B' and 9 <= num <= 30: return 2 # Lompat B1-B8 untuk VIP
+        if section == 'C' and 1 <= num <= 16: return 3
+            
+        # --- LEVEL 2: SISA KURSI (Putaran Kedua) ---
+        if section == 'A': return 4
+        if section == 'B' and num > 30: return 5
+        if section == 'C': return 6
+
+        # Level Terakhir: B1 - B8 (Hanya diisi jika benar-benar penuh/opsional)
+        if section == 'B' and 1 <= num <= 8: return 7
+            
+        return 8
+
+    # Sortir semua kursi kosong berdasarkan bobot prioritas di atas
+    sorted_free_seats = sorted(
+        free_seats, 
+        key=lambda x: (seat_priority(x['id']), x['id'][0], int(x['id'][1:]))
+    )
+    
+    # Ambil kursi sebanyak jumlah pesanan
+    assigned_ids = [s['id'] for s in sorted_free_seats[:quantity]]
+    return assigned_ids
+
+# ==========================================
 # FUNGSI PROSES TIKET & EMAIL (Dibuat Async)
 # ==========================================
 async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: str, full_name: str, email: str, ticket_type: str):
@@ -79,13 +119,21 @@ async def create_new_order(
     if category['sold'] + quantity > category['quota']:
         raise HTTPException(status_code=400, detail="Maaf, sisa kuota tiket tidak mencukupi!")
 
+    # 1.5 ALOKASIKAN KURSI SECARA OTOMATIS
+    assigned_seats = get_auto_assigned_seats(supabase, quantity)
+    if not assigned_seats:
+        raise HTTPException(status_code=400, detail="Maaf, tidak ada kursi yang cukup untuk jumlah pesanan ini.")
+        
+    # Ubah list kursi jadi string (misal: "A1, A2")
+    seats_string = ", ".join(assigned_seats)
+
     total_price = category['price'] * quantity
     order_id = str(uuid.uuid4())
 
     try:
         # 2. Upload Bukti Transfer ke Supabase Storage (Bucket: payment_proofs)
-        file_ext = os.path.splitext(payment_proof.filename)[1] # Ambil ekstensi asli (misal: .jpg, .png)
-        file_path = f"{order_id}{file_ext}" # Rename file dengan UUID pesanan biar rapi
+        file_ext = os.path.splitext(payment_proof.filename)[1]
+        file_path = f"{order_id}{file_ext}" 
         
         file_content = await payment_proof.read()
         
@@ -98,7 +146,7 @@ async def create_new_order(
         # 3. Dapatkan URL Public Gambar
         proof_url = supabase.storage.from_("payment_proofs").get_public_url(file_path)
 
-        # 4. Simpan Data ke Tabel Orders
+        # 4. Simpan Data ke Tabel Orders (Ditambah Kolom assigned_seats)
         order_payload = {
             "id": order_id,
             "full_name": full_name,
@@ -108,20 +156,31 @@ async def create_new_order(
             "quantity": quantity,
             "total_price": total_price,
             "status": "pending",
-            "payment_proof_url": proof_url # Simpan link foto
+            "payment_proof_url": proof_url,
+            "assigned_seats": seats_string # Menyimpan "A1, A2" ke database
         }
         
         insert_res = supabase.table("orders").insert(order_payload).execute()
         if not insert_res.data:
             raise HTTPException(status_code=500, detail="Gagal menyimpan data pesanan ke database")
 
+        # 5. KUNCI KURSI DI TABEL SEATS AGAR TIDAK DIAMBIL ORANG LAIN
+        # Update is_booked jadi TRUE dan catat order_id-nya
+        supabase.table("seats").update({
+            "is_booked": True,
+            "order_id": order_id
+        }).in_("id", assigned_seats).execute()
+
         return {
             "status": "success", 
             "message": "Pesanan berhasil dibuat. Bukti transfer sedang menunggu verifikasi panitia.",
-            "order_id": order_id
+            "order_id": order_id,
+            "seats": seats_string
         }
 
     except Exception as e:
+        # PENTING: Jika upload/simpan gagal, batalkan pesanan dan LEPASKAN KURSI
+        supabase.table("seats").update({"is_booked": False, "order_id": None}).in_("id", assigned_seats).execute()
         raise HTTPException(status_code=500, detail=f"Gagal memproses pesanan: {str(e)}")
 
 
@@ -161,5 +220,5 @@ async def admin_approve_order(order_id: str):
     
     return {
         "status": "success", 
-        "message": f"Verifikasi berhasil! Tiket sedang di-generate dan dikirim ke email peserta."
+        "message": f"Verifikasi berhasil! Tiket (Kursi: {order_info.get('assigned_seats', '-')}) sedang di-generate dan dikirim ke email peserta."
     }
