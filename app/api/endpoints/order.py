@@ -1,11 +1,46 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+﻿from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
 from app.core.supabase import supabase
 from app.services.ticket_gen import generate_ticket
-from app.services.mailer import send_ticket_email
+from app.services.mailer import send_ticket_email, send_order_rejection_email
 import uuid
 import os
 
 router = APIRouter()
+ORDERS_REJECT_METADATA_SUPPORTED = True
+
+
+class RejectOrderRequest(BaseModel):
+    reason: str
+
+
+def parse_assigned_seats(assigned_seats_str: str) -> list[str]:
+    if not assigned_seats_str:
+        return []
+    return [seat.strip() for seat in assigned_seats_str.split(",") if seat.strip()]
+
+
+def update_order_rejected_status(order_id: str, reason: str):
+    global ORDERS_REJECT_METADATA_SUPPORTED
+
+    if not ORDERS_REJECT_METADATA_SUPPORTED:
+        return supabase.table("orders").update({"status": "rejected"}).eq("id", order_id).execute()
+
+    payload_with_reason = {
+        "status": "rejected",
+        "rejected_reason": reason,
+        "rejected_at": "now()"
+    }
+
+    try:
+        return supabase.table("orders").update(payload_with_reason).eq("id", order_id).execute()
+    except Exception as first_error:
+        error_text = str(first_error)
+        if "rejected_reason" in error_text or "rejected_at" in error_text:
+            ORDERS_REJECT_METADATA_SUPPORTED = False
+            return supabase.table("orders").update({"status": "rejected"}).eq("id", order_id).execute()
+        raise first_error
+
 
 # ==========================================
 # LOGIKA PEMILIHAN KURSI OTOMATIS (Berdasarkan Sesi)
@@ -25,7 +60,7 @@ def get_auto_assigned_seats(supabase_client, quantity: int, ticket_type: str):
         
     response = query.execute()
     free_seats = response.data
-    
+
     if not free_seats or len(free_seats) < quantity:
         return None
 
@@ -35,7 +70,7 @@ def get_auto_assigned_seats(supabase_client, quantity: int, ticket_type: str):
         
         # --- LEVEL 1: PRIORITAS UTAMA ---
         if section == 'A' and 1 <= num <= 16: return 1
-        if section == 'B' and 9 <= num <= 30: return 2 # Lompat B1-B8 untuk VIP
+        if section == 'B' and 9 <= num <= 30: return 2
         if section == 'C' and 1 <= num <= 16: return 3
             
         # --- LEVEL 2: SISA KURSI ---
@@ -45,18 +80,18 @@ def get_auto_assigned_seats(supabase_client, quantity: int, ticket_type: str):
 
         # Level Terakhir: B1 - B8
         if section == 'B' and 1 <= num <= 8: return 7
-            
+
         return 8
 
     # Sortir semua kursi kosong
     sorted_free_seats = sorted(
-        free_seats, 
+        free_seats,
         key=lambda x: (seat_priority(x['id']), x['id'][0], int(x['id'][1:]))
     )
-    
-    # Ambil kursi sebanyak jumlah pesanan
+
     assigned_ids = [s['id'] for s in sorted_free_seats[:quantity]]
     return assigned_ids
+
 
 # ==========================================
 # FUNGSI PROSES TIKET & EMAIL (Dibuat Async)
@@ -68,25 +103,25 @@ async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: s
         except Exception as e:
             print(f"Log: Gagal update kuota terjual: {e}")
 
-        seat_list = [s.strip() for s in assigned_seats_str.split(",")] if assigned_seats_str else []
+        seat_list = parse_assigned_seats(assigned_seats_str)
 
         generated_tickets = []
         for i in range(qty):
-            short_id = str(order_id).split("-")[0].upper() 
+            short_id = str(order_id).split("-")[0].upper()
             ticket_code = f"TEDX-{short_id}-{i+1}"
             
             current_seat = seat_list[i] if i < len(seat_list) else "TBD"
             
             ticket_data = generate_ticket(
-                ticket_code=ticket_code, 
-                buyer_name=full_name, 
+                ticket_code=ticket_code,
+                buyer_name=full_name,
                 ticket_type=ticket_type,
                 seat_number=current_seat
             )
-            
+
             if ticket_data:
-                db_url = ticket_data.get("public_url", "") 
-                
+                db_url = ticket_data.get("public_url", "")
+
                 supabase.table("tickets").insert({
                     "order_id": order_id,
                     "ticket_code": ticket_code,
@@ -98,7 +133,7 @@ async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: s
         if generated_tickets:
             send_ticket_email(email, full_name, generated_tickets)
             print(f"Log: Sukses mengirim {len(generated_tickets)} tiket ke {email}")
-            
+
     except Exception as e:
         print(f"Critical Error on Process Task: {str(e)}")
 
@@ -119,7 +154,7 @@ async def create_new_order(
     res = supabase.table("ticket_categories").select("*").eq("id", category_id).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Kategori tiket tidak ditemukan")
-    
+
     category = res.data[0]
     t_type = category['name'].upper()
     
@@ -138,9 +173,10 @@ async def create_new_order(
     try:
         # 2. Upload Bukti Transfer
         file_ext = os.path.splitext(payment_proof.filename)[1]
-        file_path = f"{order_id}{file_ext}" 
-        
+        file_path = f"{order_id}{file_ext}"
+
         file_content = await payment_proof.read()
+
         supabase.storage.from_("payment_proofs").upload(
             path=file_path,
             file=file_content,
@@ -210,21 +246,21 @@ async def create_new_order(
 @router.post("/approve/{order_id}")
 async def admin_approve_order(order_id: str):
     order_res = supabase.table("orders").select("*, ticket_categories(name)").eq("id", order_id).execute()
-    
+
     if not order_res.data:
         raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
-        
+
     order_info = order_res.data[0]
-    
+
     if order_info['status'] == 'success':
         return {"status": "already_processed", "message": "Sudah sukses sebelumnya."}
 
     supabase.table("orders").update({"status": "success"}).eq("id", order_id).execute()
-    
-    qty = order_info.get('quantity', 1) 
+
+    qty = order_info.get('quantity', 1)
     cat_id = order_info['category_id']
     ticket_type_name = order_info['ticket_categories']['name']
-    
+
     await process_ticket_generation_and_email(
         order_id=order_id,
         qty=qty,
@@ -234,7 +270,7 @@ async def admin_approve_order(order_id: str):
         ticket_type=ticket_type_name,
         assigned_seats_str=order_info.get('assigned_seats', '')
     )
-    
+
     return {
         "status": "success", 
         "message": f"Verifikasi berhasil! Tiket (Kursi: {order_info.get('assigned_seats', '-')}) sedang dikirim."
@@ -244,24 +280,37 @@ async def admin_approve_order(order_id: str):
 # ENDPOINT ADMIN: TOLAK PEMBAYARAN (REJECT)
 # ==========================================
 @router.post("/reject/{order_id}")
-async def admin_reject_order(order_id: str):
-    # 1. Cari data pesanan dan kategori tiketnya
+async def admin_reject_order(order_id: str, payload: RejectOrderRequest):
+    # 1. Cari data pesanan dan join dengan ticket_categories agar dapat nama kategori (untuk tau sesi)
     order_res = supabase.table("orders").select("*, ticket_categories(name)").eq("id", order_id).execute()
     
     if not order_res.data:
         raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
         
     order_info = order_res.data[0]
+    current_status = order_info.get("status")
+    reason = payload.reason.strip()
+    
+    # Ambil t_type dari relasi ticket_categories yang barusan di-select
     t_type = order_info['ticket_categories']['name'].upper()
-    assigned_seats_str = order_info.get('assigned_seats', '')
+
+    # Validasi dari tim kamu
+    if not reason:
+        raise HTTPException(status_code=400, detail="Alasan reject wajib diisi.")
+
+    if current_status == "success":
+        raise HTTPException(status_code=400, detail="Pesanan yang sudah disetujui tidak bisa ditolak.")
+
+    if current_status == "rejected":
+        return {"status": "already_rejected", "message": "Pesanan ini sudah ditolak sebelumnya."}
+
+    # 2. Eksekusi fungsi update status buatan tim kamu
+    update_order_rejected_status(order_id, reason)
     
-    # 2. Ubah status pesanan menjadi 'rejected'
-    supabase.table("orders").update({"status": "rejected"}).eq("id", order_id).execute()
+    # 3. LEPASKAN KURSI SESUAI SESI (Logikamu)
+    assigned_seats = parse_assigned_seats(order_info.get("assigned_seats", ""))
     
-    # 3. LEPASKAN KURSI SESUAI SESI
-    if assigned_seats_str:
-        seat_list = [s.strip() for s in assigned_seats_str.split(",")]
-        
+    if assigned_seats:
         rollback_data = {}
         if "MORNING" in t_type:
             rollback_data = {"is_booked_morning": False, "order_id_morning": None}
@@ -273,9 +322,13 @@ async def admin_reject_order(order_id: str):
                 "order_id_morning": None, "order_id_afternoon": None
             }
             
-        supabase.table("seats").update(rollback_data).in_("id", seat_list).execute()
+        supabase.table("seats").update(rollback_data).in_("id", assigned_seats).execute()
+    
+    # 4. Kirim email penolakan (Logika tim kamu)
+    send_order_rejection_email(order_info.get("email", ""), order_info.get("full_name", "Peserta"), reason)
     
     return {
         "status": "success", 
-        "message": f"Pesanan ditolak. Kursi {assigned_seats_str} telah tersedia kembali."
+        "message": f"Pesanan ditolak. Kursi {order_info.get('assigned_seats', '-')} dilepas kembali dan email notifikasi telah dikirim.",
+        "reason": reason
     }
