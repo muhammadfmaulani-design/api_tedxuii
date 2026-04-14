@@ -50,29 +50,36 @@ def get_auto_assigned_seats(supabase_client, quantity: int):
 # ==========================================
 # FUNGSI PROSES TIKET & EMAIL (Dibuat Async)
 # ==========================================
-async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: str, full_name: str, email: str, ticket_type: str):
+async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: str, full_name: str, email: str, ticket_type: str, assigned_seats_str: str):
     """
     Fungsi ini ditunggu (await) agar Vercel tidak membunuh proses di tengah jalan.
     Hanya dijalankan ketika ADMIN menekan tombol APPROVE.
     """
     try:
-        # 1. Update Jumlah Terjual di Tabel Kategori (Kuota baru berkurang saat di-approve)
+        # 1. Update Jumlah Terjual di Tabel Kategori
         try:
             supabase.rpc('increment_sold', {'row_id': cat_id, 'amount': qty}).execute()
         except Exception as e:
             print(f"Log: Gagal update kuota terjual: {e}")
 
-        # 2. Looping untuk membuat tiket
+        # 2. Pecah string kursi (misal: "A1, A2" jadi list ['A1', 'A2'])
+        seat_list = [s.strip() for s in assigned_seats_str.split(",")] if assigned_seats_str else []
+
+        # 3. Looping untuk membuat tiket fisik
         generated_tickets = []
         for i in range(qty):
             short_id = str(order_id).split("-")[0].upper() 
             ticket_code = f"TEDX-{short_id}-{i+1}"
             
-            # Generate gambar tiket fisik
+            # Ambil kursi spesifik untuk tiket ini (kalau tidak ada, fallback ke TBD)
+            current_seat = seat_list[i] if i < len(seat_list) else "TBD"
+            
+            # Generate gambar tiket fisik dengan membawa data kursi
             ticket_data = generate_ticket(
                 ticket_code=ticket_code, 
                 buyer_name=full_name, 
-                ticket_type=ticket_type 
+                ticket_type=ticket_type,
+                seat_number=current_seat
             )
             
             if ticket_data:
@@ -87,7 +94,7 @@ async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: s
                 # Simpan seluruh dict (local_path & seat) untuk dilampirkan ke email
                 generated_tickets.append(ticket_data)
         
-        # 3. Kirim email beserta GAMBARNYA
+        # 4. Kirim email beserta GAMBARNYA
         if generated_tickets:
             send_ticket_email(email, full_name, generated_tickets)
             print(f"Log: Sukses mengirim {len(generated_tickets)} tiket ke {email}")
@@ -115,7 +122,6 @@ async def create_new_order(
     
     category = res.data[0]
     
-    # Mencegah user checkout jika kuota beneran habis
     if category['sold'] + quantity > category['quota']:
         raise HTTPException(status_code=400, detail="Maaf, sisa kuota tiket tidak mencukupi!")
 
@@ -124,9 +130,7 @@ async def create_new_order(
     if not assigned_seats:
         raise HTTPException(status_code=400, detail="Maaf, tidak ada kursi yang cukup untuk jumlah pesanan ini.")
         
-    # Ubah list kursi jadi string (misal: "A1, A2")
     seats_string = ", ".join(assigned_seats)
-
     total_price = category['price'] * quantity
     order_id = str(uuid.uuid4())
 
@@ -143,10 +147,9 @@ async def create_new_order(
             file_options={"content-type": payment_proof.content_type}
         )
         
-        # 3. Dapatkan URL Public Gambar
         proof_url = supabase.storage.from_("payment_proofs").get_public_url(file_path)
 
-        # 4. Simpan Data ke Tabel Orders (Ditambah Kolom assigned_seats)
+        # 3. Simpan Data ke Tabel Orders
         order_payload = {
             "id": order_id,
             "full_name": full_name,
@@ -157,15 +160,14 @@ async def create_new_order(
             "total_price": total_price,
             "status": "pending",
             "payment_proof_url": proof_url,
-            "assigned_seats": seats_string # Menyimpan "A1, A2" ke database
+            "assigned_seats": seats_string
         }
         
         insert_res = supabase.table("orders").insert(order_payload).execute()
         if not insert_res.data:
             raise HTTPException(status_code=500, detail="Gagal menyimpan data pesanan ke database")
 
-        # 5. KUNCI KURSI DI TABEL SEATS AGAR TIDAK DIAMBIL ORANG LAIN
-        # Update is_booked jadi TRUE dan catat order_id-nya
+        # 4. KUNCI KURSI DI TABEL SEATS AGAR TIDAK DIAMBIL ORANG LAIN
         supabase.table("seats").update({
             "is_booked": True,
             "order_id": order_id
@@ -179,7 +181,7 @@ async def create_new_order(
         }
 
     except Exception as e:
-        # PENTING: Jika upload/simpan gagal, batalkan pesanan dan LEPASKAN KURSI
+        # Lepaskan kursi jika pesanan gagal diproses
         supabase.table("seats").update({"is_booked": False, "order_id": None}).in_("id", assigned_seats).execute()
         raise HTTPException(status_code=500, detail=f"Gagal memproses pesanan: {str(e)}")
 
@@ -189,7 +191,6 @@ async def create_new_order(
 # ==========================================
 @router.post("/approve/{order_id}")
 async def admin_approve_order(order_id: str):
-    # 1. Cari Pesanan
     order_res = supabase.table("orders").select("*, ticket_categories(name)").eq("id", order_id).execute()
     
     if not order_res.data:
@@ -197,14 +198,11 @@ async def admin_approve_order(order_id: str):
         
     order_info = order_res.data[0]
     
-    # 2. Cegah Double Approve
     if order_info['status'] == 'success':
         return {"status": "already_processed", "message": "Pesanan ini sudah sukses sebelumnya."}
 
-    # 3. Ubah Status Jadi Success
     supabase.table("orders").update({"status": "success"}).eq("id", order_id).execute()
     
-    # 4. Tembak Generator Tiket & Email (AWAIT)
     qty = order_info.get('quantity', 1) 
     cat_id = order_info['category_id']
     ticket_type_name = order_info['ticket_categories']['name']
@@ -215,7 +213,8 @@ async def admin_approve_order(order_id: str):
         cat_id=cat_id,
         full_name=order_info['full_name'],
         email=order_info['email'],
-        ticket_type=ticket_type_name
+        ticket_type=ticket_type_name,
+        assigned_seats_str=order_info.get('assigned_seats', '')
     )
     
     return {

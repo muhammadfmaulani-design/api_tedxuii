@@ -2,7 +2,6 @@ import qrcode
 import os
 import tempfile
 from PIL import Image, ImageDraw, ImageFont
-from app.core.supabase import supabase
 
 def wrap_and_truncate_text(text: str, font, max_width: int, max_lines: int = 2) -> str:
     """
@@ -15,7 +14,6 @@ def wrap_and_truncate_text(text: str, font, max_width: int, max_lines: int = 2) 
     
     for word in words:
         test_line = " ".join(current_line + [word])
-        # Cek apakah kata tambahan ini masih muat di baris sekarang
         if font.getlength(test_line) <= max_width:
             current_line.append(word)
         else:
@@ -23,65 +21,35 @@ def wrap_and_truncate_text(text: str, font, max_width: int, max_lines: int = 2) 
                 lines.append(" ".join(current_line))
                 current_line = [word]
             else:
-                # Jika 1 kata saja sudah melebihi batas (kata super panjang)
                 lines.append(word)
                 current_line = []
                 
     if current_line:
         lines.append(" ".join(current_line))
         
-    # --- LOGIKA PEMOTONGAN (TRUNCATE) ---
     if len(lines) > max_lines:
-        # Ambil baris sesuai batas maksimal saja
         lines = lines[:max_lines]
-        
-        # Ambil baris paling terakhir untuk dipotong
         last_line = lines[-1]
-        
-        # Hapus kata dari belakang satu per satu sampai muat ditambah "..."
         while True:
             test_last_line = last_line + "_"
             if font.getlength(test_last_line) <= max_width or len(last_line.split()) <= 1:
                 lines[-1] = test_last_line
                 break
             else:
-                # Hapus 1 kata terakhir dari kalimat
                 last_words = last_line.split()
                 last_line = " ".join(last_words[:-1])
                 
     return "\n".join(lines)
 
 
-def generate_ticket(ticket_code: str, buyer_name: str, ticket_type: str = "FULL") -> dict:
+def generate_ticket(ticket_code: str, buyer_name: str, ticket_type: str = "FULL", seat_number: str = "TBD") -> dict:
     """
     Menghasilkan tiket fisik (JPG) TEDxUII dengan resolusi tinggi.
     File disimpan secara aman di temporary directory agar kompatibel dengan Vercel Serverless.
     """
     
     # ==========================================
-    # 1. ALOKASI KURSI (SUPABASE)
-    # ==========================================
-    try:
-        seat_res = supabase.table("seats")\
-            .select("seat_number")\
-            .eq("is_available", True)\
-            .order("id", desc=False)\
-            .limit(1).execute()
-        
-        seat_number = seat_res.data[0]['seat_number'] if seat_res.data else "N/A"
-        
-        if seat_number != "N/A":
-            supabase.table("seats").update({
-                "is_available": False, 
-                "assigned_to": ticket_code
-            }).eq("seat_number", seat_number).execute()
-            
-    except Exception as e:
-        print(f"⚠️ [TicketGen] Database Error: {e}")
-        seat_number = "TBD"
-
-    # ==========================================
-    # 2. RESOLVE PATH TEMPLATE & FONT
+    # 1. RESOLVE PATH TEMPLATE & FONT
     # ==========================================
     t_type = ticket_type.upper()
     if "MORNING" in t_type:
@@ -101,7 +69,7 @@ def generate_ticket(ticket_code: str, buyer_name: str, ticket_type: str = "FULL"
         raise FileNotFoundError(f"[TicketGen] Template hilang di: {template_path}")
 
     # ==========================================
-    # 3. PROSES GAMBAR & RENDER TEKS
+    # 2. PROSES GAMBAR & RENDER TEKS
     # ==========================================
     img = Image.open(template_path).convert('RGB')
     draw = ImageDraw.Draw(img)
@@ -113,18 +81,18 @@ def generate_ticket(ticket_code: str, buyer_name: str, ticket_type: str = "FULL"
         font_obj = ImageFont.load_default()
 
     color_white = (255, 255, 255)
-    
-    # --- AUTO WRAP & TRUNCATE NAMA ---
     MAX_NAME_WIDTH = 680
     
-    # max_lines=2 artinya nama hanya boleh maksimal 2 baris. Sisanya jadi "..."
     wrapped_name = wrap_and_truncate_text(buyer_name.upper(), font_obj, MAX_NAME_WIDTH, max_lines=2)
     
+    # Cetak Nama
     draw.multiline_text((322, 562), wrapped_name, font=font_obj, fill=color_white, spacing=15)
+    
+    # Cetak Nomor Kursi
     draw.text((1066, 522), seat_number, font=font_obj, fill=color_white)
 
     # ==========================================
-    # 4. GENERATE & RENDER QR CODE
+    # 3. GENERATE & RENDER QR CODE
     # ==========================================
     qr = qrcode.QRCode(
         version=1, 
@@ -141,7 +109,7 @@ def generate_ticket(ticket_code: str, buyer_name: str, ticket_type: str = "FULL"
     img.paste(qr_img, (1738, 445)) 
 
     # ==========================================
-    # 5. SIMPAN KE TEMPORARY DIRECTORY (VERCEL SAFE)
+    # 4. SIMPAN KE TEMPORARY DIRECTORY
     # ==========================================
     temp_dir = tempfile.gettempdir()
     output_name = f"ticket_{ticket_code}.jpg"
