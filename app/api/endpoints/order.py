@@ -14,6 +14,19 @@ class RejectOrderRequest(BaseModel):
     reason: str
 
 
+class ManualOrderRequest(BaseModel):
+    full_name: str
+    email: str
+    whatsapp_no: str
+    category_id: str
+    quantity: int = 1
+    send_email: bool = False
+
+
+class UpdateTicketUsageRequest(BaseModel):
+    is_used: bool
+
+
 def parse_assigned_seats(assigned_seats_str: str) -> list[str]:
     if not assigned_seats_str:
         return []
@@ -123,7 +136,16 @@ def get_auto_assigned_seats(supabase_client, quantity: int, ticket_type: str):
 # ==========================================
 # FUNGSI PROSES TIKET & EMAIL (Dibuat Async)
 # ==========================================
-async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: str, full_name: str, email: str, ticket_type: str, assigned_seats_str: str):
+async def process_ticket_generation_and_email(
+    order_id: str,
+    qty: int,
+    cat_id: str,
+    full_name: str,
+    email: str,
+    ticket_type: str,
+    assigned_seats_str: str,
+    send_email: bool = True
+):
     try:
         try:
             supabase.rpc('increment_sold', {'row_id': cat_id, 'amount': qty}).execute()
@@ -157,12 +179,26 @@ async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: s
                 
                 generated_tickets.append(ticket_data)
         
-        if generated_tickets:
+        if generated_tickets and send_email:
             send_ticket_email(email, full_name, generated_tickets)
             print(f"Log: Sukses mengirim {len(generated_tickets)} tiket ke {email}")
 
     except Exception as e:
         print(f"Critical Error on Process Task: {str(e)}")
+
+
+@router.get("/categories")
+async def get_ticket_categories():
+    try:
+        categories_res = (
+            supabase.table("ticket_categories")
+            .select("id, name, price, quota, sold")
+            .order("name")
+            .execute()
+        )
+        return {"status": "success", "categories": categories_res.data or []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil kategori tiket: {str(e)}")
 
 
 @router.get("/public")
@@ -210,6 +246,103 @@ async def get_public_orders():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal mengambil daftar order: {str(e)}")
+
+
+@router.post("/manual")
+async def create_manual_order(payload: ManualOrderRequest):
+    if payload.quantity < 1:
+        raise HTTPException(status_code=400, detail="Quantity minimal 1.")
+
+    res = supabase.table("ticket_categories").select("*").eq("id", payload.category_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Kategori tiket tidak ditemukan")
+
+    category = res.data[0]
+    t_type = category["name"].upper()
+
+    if category["sold"] + payload.quantity > category["quota"]:
+        raise HTTPException(status_code=400, detail="Sisa kuota tiket tidak mencukupi.")
+
+    assigned_seats = get_auto_assigned_seats(supabase, payload.quantity, t_type)
+    if not assigned_seats:
+        raise HTTPException(status_code=400, detail="Kursi untuk sesi ini sudah penuh.")
+
+    order_id = str(uuid.uuid4())
+    seats_string = ", ".join(assigned_seats)
+    total_price = category["price"] * payload.quantity
+
+    try:
+        order_payload = {
+            "id": order_id,
+            "full_name": payload.full_name,
+            "email": payload.email,
+            "whatsapp_no": payload.whatsapp_no,
+            "category_id": payload.category_id,
+            "quantity": payload.quantity,
+            "total_price": total_price,
+            "status": "success",
+            "payment_proof_url": None,
+            "assigned_seats": seats_string
+        }
+
+        insert_res = supabase.table("orders").insert(order_payload).execute()
+        if not insert_res.data:
+            raise HTTPException(status_code=500, detail="Gagal menyimpan pesanan manual.")
+
+        supabase.table("seats").update(get_seat_lock_payload(t_type, order_id)).in_("id", assigned_seats).execute()
+
+        await process_ticket_generation_and_email(
+            order_id=order_id,
+            qty=payload.quantity,
+            cat_id=payload.category_id,
+            full_name=payload.full_name,
+            email=payload.email,
+            ticket_type=category["name"],
+            assigned_seats_str=seats_string,
+            send_email=payload.send_email
+        )
+
+        return {
+            "status": "success",
+            "message": "Tiket manual berhasil dibuat.",
+            "order_id": order_id,
+            "seats": assigned_seats
+        }
+    except HTTPException:
+        supabase.table("seats").update(get_seat_release_payload(t_type)).in_("id", assigned_seats).execute()
+        raise
+    except Exception as e:
+        supabase.table("seats").update(get_seat_release_payload(t_type)).in_("id", assigned_seats).execute()
+        raise HTTPException(status_code=500, detail=f"Gagal membuat tiket manual: {str(e)}")
+
+
+@router.patch("/tickets/{ticket_id}/usage")
+async def update_ticket_usage(ticket_id: str, payload: UpdateTicketUsageRequest):
+    ticket_res = (
+        supabase.table("tickets")
+        .select("id, is_used")
+        .eq("id", ticket_id)
+        .execute()
+    )
+
+    if not ticket_res.data:
+        raise HTTPException(status_code=404, detail="Tiket tidak ditemukan")
+
+    update_payload = {"is_used": payload.is_used}
+    update_payload["checkin_at"] = "now()" if payload.is_used else None
+
+    updated_res = (
+        supabase.table("tickets")
+        .update(update_payload)
+        .eq("id", ticket_id)
+        .execute()
+    )
+
+    return {
+        "status": "success",
+        "message": "Status scan tiket berhasil diperbarui.",
+        "ticket": updated_res.data[0] if updated_res.data else {"id": ticket_id, "is_used": payload.is_used}
+    }
 
 
 # ==========================================
@@ -405,4 +538,36 @@ async def admin_reject_order(order_id: str, payload: RejectOrderRequest):
         "status": "success", 
         "message": f"Pesanan ditolak. Kursi {order_info.get('assigned_seats', '-')} dilepas kembali dan email notifikasi telah dikirim.",
         "reason": reason
+    }
+
+
+def get_seat_lock_payload(ticket_type: str, order_id: str) -> dict:
+    t_type = ticket_type.upper()
+
+    if "MORNING" in t_type:
+        return {"is_booked_morning": True, "order_id_morning": order_id}
+    if "AFTERNOON" in t_type:
+        return {"is_booked_afternoon": True, "order_id_afternoon": order_id}
+
+    return {
+        "is_booked_morning": True,
+        "is_booked_afternoon": True,
+        "order_id_morning": order_id,
+        "order_id_afternoon": order_id
+    }
+
+
+def get_seat_release_payload(ticket_type: str) -> dict:
+    t_type = ticket_type.upper()
+
+    if "MORNING" in t_type:
+        return {"is_booked_morning": False, "order_id_morning": None}
+    if "AFTERNOON" in t_type:
+        return {"is_booked_afternoon": False, "order_id_afternoon": None}
+
+    return {
+        "is_booked_morning": False,
+        "is_booked_afternoon": False,
+        "order_id_morning": None,
+        "order_id_afternoon": None
     }
