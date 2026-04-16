@@ -20,6 +20,33 @@ def parse_assigned_seats(assigned_seats_str: str) -> list[str]:
     return [seat.strip() for seat in assigned_seats_str.split(",") if seat.strip()]
 
 
+def serialize_public_order(order_row: dict, ticket_rows: list[dict]) -> dict:
+    category_info = order_row.get("ticket_categories") or {}
+
+    return {
+        "id": order_row.get("id"),
+        "full_name": order_row.get("full_name"),
+        "email": order_row.get("email"),
+        "whatsapp_no": order_row.get("whatsapp_no"),
+        "status": order_row.get("status"),
+        "quantity": order_row.get("quantity", 0),
+        "total_price": order_row.get("total_price", 0),
+        "assigned_seats": parse_assigned_seats(order_row.get("assigned_seats", "")),
+        "payment_proof_url": order_row.get("payment_proof_url"),
+        "created_at": order_row.get("created_at"),
+        "ticket_category": category_info.get("name"),
+        "tickets": [
+            {
+                "id": ticket.get("id"),
+                "ticket_code": ticket.get("ticket_code"),
+                "is_used": ticket.get("is_used", False),
+                "ticket_pdf_url": ticket.get("ticket_pdf_url")
+            }
+            for ticket in ticket_rows
+        ]
+    }
+
+
 def update_order_rejected_status(order_id: str, reason: str):
     global ORDERS_REJECT_METADATA_SUPPORTED
 
@@ -119,6 +146,53 @@ async def process_ticket_generation_and_email(order_id: str, qty: int, cat_id: s
 
     except Exception as e:
         print(f"Critical Error on Process Task: {str(e)}")
+
+
+@router.get("/public")
+async def get_public_orders():
+    try:
+        orders_res = supabase.table("orders").select("*, ticket_categories(name)").execute()
+        orders = orders_res.data or []
+
+        if not orders:
+            return {"status": "success", "count": 0, "orders": []}
+
+        order_ids = [order["id"] for order in orders if order.get("id")]
+        tickets_by_order_id = {order_id: [] for order_id in order_ids}
+
+        if order_ids:
+            tickets_res = (
+                supabase.table("tickets")
+                .select("id, order_id, ticket_code, is_used, ticket_pdf_url")
+                .in_("order_id", order_ids)
+                .execute()
+            )
+
+            for ticket in tickets_res.data or []:
+                order_id = ticket.get("order_id")
+                if order_id in tickets_by_order_id:
+                    tickets_by_order_id[order_id].append(ticket)
+
+        sorted_orders = sorted(
+            orders,
+            key=lambda order: (
+                order.get("created_at") is None,
+                order.get("created_at") or "",
+                order.get("full_name") or ""
+            ),
+            reverse=True
+        )
+
+        return {
+            "status": "success",
+            "count": len(sorted_orders),
+            "orders": [
+                serialize_public_order(order, tickets_by_order_id.get(order["id"], []))
+                for order in sorted_orders
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengambil daftar order: {str(e)}")
 
 
 # ==========================================
